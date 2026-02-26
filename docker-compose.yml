@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: agro_semantic_search_db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-agroscholar_db}
+      POSTGRES_USER: ${DB_USER:-agroscholar_user}
+      POSTGRES_PASSWORD: ${DB_PASS:-agroscholar_pass}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+    driver: local
