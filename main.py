@@ -1,21 +1,31 @@
 import os
-import sys
 import time
 from dotenv import load_dotenv
 
 # 1. Carregamento das variáveis de ambiente
 load_dotenv()
 
+
 def main():
+    """
+    Interface principal de chat para o assistente RAG.
+    
+    Inicializa os componentes de IA, configuradores de retriever e chain,
+    e fornece um loop interativo para perguntas do usuário.
+    """
     # Inicialização preventiva para evitar erro de 'not defined'
     rag_chain = None
     
-    api_key = os.getenv("GOOGLE_API_KEY")
-    # Usando DATABASE_URL conforme seu .env ou o padrão do docker
-    db_url = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
+    from config import (
+        GOOGLE_API_KEY, DATABASE_URL, EMBEDDING_MODEL, EMBEDDING_TASK_TYPE,
+        LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS, RAG_PROMPT_TEMPLATE,
+        COLLECTION_NAME, MAX_RETRY_ATTEMPTS, RETRY_DELAY_SECONDS,
+        QUERY_EXPANSION_ENABLED, QUERY_EXPANSION_VARIANTS,
+        validate_critical_config
+    )
     
-    if not api_key or not db_url:
-        print("❌ Erro: Verifique as variáveis GOOGLE_API_KEY e DATABASE_URL no seu .env")
+    # Validar configurações críticas
+    if not validate_critical_config():
         return
 
     # 2. Imports internos para otimização
@@ -28,46 +38,69 @@ def main():
 
         print("✅ Bibliotecas carregadas. Configurando IA...")
 
-         # 3. Configuração dos Modelos (Ajustados para o seu ambiente)
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-001")
-        
-        embeddings= GoogleGenerativeAIEmbeddings(
-                model="models/gemini-embedding-001",
-                task_type="retrieval_document",
+        # 3. Configuração dos Modelos
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model=EMBEDDING_MODEL,
+            task_type=EMBEDDING_TASK_TYPE,
         )
         
         # Conexão com o Vector Store
         vector_store = PGVector(
-            connection_string=db_url,
+            connection_string=DATABASE_URL,
             embedding_function=embeddings,
-            collection_name="agro_docs_collection",
+            collection_name=COLLECTION_NAME,
         )
         
-        # Retriever configurado para buscar os 3 trechos mais relevantes
-        retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+        # Retriever configurado para buscar os 5 trechos mais relevantes
+        # (aumentado de 3 para melhor cobertura com query expansion)
+        retriever = vector_store.as_retriever(search_kwargs={"k": 5})
         
-        # No local onde você define o LLM, mude para:
+        # Configuração do LLM
         llm = ChatGoogleGenerativeAI(
-            model="gemini-3-flash-preview", # Nome exato e estável
-            google_api_key=api_key, 
-            temperature=0.2,
-            max_output_tokens=1024 # Boa prática para economizar cota e evitar truncamento
+            model=LLM_MODEL,
+            google_api_key=GOOGLE_API_KEY,
+            temperature=LLM_TEMPERATURE,
+            max_output_tokens=LLM_MAX_TOKENS
         )
 
         # Template de Prompt
-        template = """Você é um assistente técnico especializado do MBA. 
-        Use o contexto abaixo para responder à pergunta. Se não encontrar a resposta, 
-        diga claramente que a informação não consta no documento.
+        prompt = ChatPromptTemplate.from_template(RAG_PROMPT_TEMPLATE)
 
-        Contexto: {context}
-        Pergunta: {question}
-        Resposta:"""
-        
-        prompt = ChatPromptTemplate.from_template(template)
+        # Função de Query Expansion para melhor recuperação semântica
+        def expand_query(query: str) -> str:
+            """
+            Expande a pergunta do usuário em múltiplas variações semânticas.
+            Aumenta a chance de encontrar conteúdo tabelar e textual relevante.
+            """
+            if not QUERY_EXPANSION_ENABLED:
+                return query
+            
+            expansion_prompt = f"""Você é um especialista em reformulação de perguntas.
+            Dada a pergunta do usuário, gere {QUERY_EXPANSION_VARIANTS} variações semanticamente diferentes
+            que buscam a mesma informação mas com termos e estruturas diferentes.
+            
+            Pergunta original: {query}
+            
+            Retorne APENAS as variações separadas por '|', sem numeração ou explicações.
+            Exemplo: variação1 | variação2 | variação3"""
+            
+            try:
+                expansions = llm.invoke(expansion_prompt)
+                expanded_queries = [query] + [q.strip() for q in expansions.split('|') if q.strip()]
+                return " ".join(expanded_queries[:QUERY_EXPANSION_VARIANTS + 1])
+            except:
+                # Se falhar na expansão, usa a query original
+                return query
 
-        # Construção da Chain (LCEL)
+        # Retriever com Query Expansion
+        def retrieve_with_expansion(query: str):
+            """Recupera documentos usando query expansion."""
+            expanded = expand_query(query)
+            return retriever.invoke(expanded)
+
+        # Construção da Chain (LCEL) com Query Expansion
         rag_chain = (
-            {"context": retriever, "question": RunnablePassthrough()}
+            {"context": lambda x: retrieve_with_expansion(x), "question": RunnablePassthrough()}
             | prompt
             | llm
             | StrOutputParser()
@@ -77,10 +110,10 @@ def main():
         print(f"❌ Erro crítico na inicialização: {e}")
         return
 
-    # 3. Interface de Chat (CLI)
+    # 4. Interface de Chat (CLI)
     if rag_chain:
         print("\n" + "="*40)
-        print("🤖 Assistente RAG MBA-AI (gemini-3-flash-preview)")
+        print(f"🤖 Assistente RAG MBA-AI ({LLM_MODEL})")
         print("Digite 'sair' para encerrar a sessão.")
         print("="*40 + "\n")
 
@@ -96,19 +129,19 @@ def main():
                     break
                 
                 # Implementação de Retry para gerenciar cotas (429)
-                for tentativa in range(3):
+                for tentativa in range(MAX_RETRY_ATTEMPTS):
                     try:
                         response = rag_chain.invoke(user_query)
                         print(f"\n💡 Resposta: {response}\n")
                         print("-" * 20)
-                        break # Sucesso, sai do loop de tentativas
+                        break  # Sucesso, sai do loop de tentativas
                         
                     except Exception as e:
                         error_msg = str(e)
                         if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                            if tentativa < 2:
-                                print(f"⏳ Cota atingida. Aguardando 30s para tentar novamente ({tentativa + 1}/3)...")
-                                time.sleep(30)
+                            if tentativa < MAX_RETRY_ATTEMPTS - 1:
+                                print(f"⏳ Cota atingida. Aguardando {RETRY_DELAY_SECONDS}s para tentar novamente ({tentativa + 1}/{MAX_RETRY_ATTEMPTS})...")
+                                time.sleep(RETRY_DELAY_SECONDS)
                                 continue
                         # Se for outro erro ou esgotar tentativas, exibe o erro
                         print(f"⚠️ Erro na geração: {e}")
