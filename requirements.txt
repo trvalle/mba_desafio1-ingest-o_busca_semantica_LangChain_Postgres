@@ -7,3 +7,9 @@ langchain-google-genai==1.0.4
 pypdf==4.1.0
 tiktoken==0.6.0
 
+# Exames de Sangue — Health Tracker (PWA)
+fastapi>=0.109.0,<2.0.0
+uvicorn[standard]>=0.25.0,<1.0.0
+python-multipart>=0.0.7,<1.0.0
+aiofiles>=23.2.1,<25.2.0
+

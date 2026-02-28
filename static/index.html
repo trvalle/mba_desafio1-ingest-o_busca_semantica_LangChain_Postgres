@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#2563eb" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Saúde Track" />
+  <title>Saúde Track — Exames de Sangue</title>
+  <link rel="manifest" href="/static/manifest.json" />
+  <!-- Inline canvas-based chart renderer (no external dependencies, works offline) -->
+  <script>
+  // Lightweight inline chart renderer (no external dependencies)
+  window.SaudeChart = {
+    _instances: {},
+    draw(canvasId, labels, datasets, options) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const W = canvas.clientWidth || 340;
+      const H = canvas.clientHeight || 260;
+      canvas.width  = W * (window.devicePixelRatio || 1);
+      canvas.height = H * (window.devicePixelRatio || 1);
+      ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+
+      const PAD = { top:16, right:16, bottom:48, left:52 };
+      const cW = W - PAD.left - PAD.right;
+      const cH = H - PAD.top  - PAD.bottom;
+
+      ctx.clearRect(0, 0, W, H);
+
+      // Collect all values to determine y range
+      const allVals = datasets.flatMap(d => d.data.filter(v => v != null && !isNaN(v)));
+      if (allVals.length === 0) return;
+      let yMin = Math.min(...allVals);
+      let yMax = Math.max(...allVals);
+      if (options && options.yMin != null) yMin = Math.min(yMin, options.yMin);
+      if (options && options.yMax != null) yMax = Math.max(yMax, options.yMax);
+      const pad = (yMax - yMin) * 0.15 || 1;
+      yMin -= pad; yMax += pad;
+      const yRange = yMax - yMin;
+
+      const xStep = labels.length > 1 ? cW / (labels.length - 1) : cW;
+      function xOf(i) { return PAD.left + (labels.length > 1 ? i * xStep : cW / 2); }
+      function yOf(v) { return PAD.top + cH - ((v - yMin) / yRange * cH); }
+
+      // Grid lines
+      ctx.lineWidth = 1;
+      ctx.font = `11px -apple-system, BlinkMacSystemFont, sans-serif`;
+      const ticks = 5;
+      for (let i = 0; i <= ticks; i++) {
+        const v = yMin + (yRange / ticks) * i;
+        const y = yOf(v);
+        ctx.strokeStyle = '#e5e7eb'; ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + cW, y); ctx.stroke();
+        ctx.fillStyle = '#6b7280'; ctx.textAlign = 'right'; ctx.fillText(v.toFixed(1), PAD.left - 4, y + 4);
+      }
+
+      // X axis labels
+      ctx.textAlign = 'center'; ctx.fillStyle = '#6b7280';
+      const maxLabels = Math.max(2, Math.floor(cW / 50));
+      const labelStep = Math.max(1, Math.ceil(labels.length / maxLabels));
+      labels.forEach((lbl, i) => {
+        if (i % labelStep === 0 || i === labels.length - 1) ctx.fillText(lbl, xOf(i), PAD.top + cH + 16);
+      });
+
+      // Datasets (draw lines first, then points)
+      datasets.forEach(ds => {
+        if (!ds.data || ds.data.length === 0) return;
+        ctx.setLineDash(ds.borderDash || []);
+        ctx.strokeStyle = ds.borderColor || '#2563eb';
+        ctx.lineWidth = ds.borderDash ? 1.5 : 2;
+        ctx.beginPath();
+        let started = false;
+        ds.data.forEach((v, i) => {
+          if (v == null || isNaN(v)) return;
+          if (!started) { ctx.moveTo(xOf(i), yOf(v)); started = true; } else ctx.lineTo(xOf(i), yOf(v));
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        if (ds.showPoints !== false && !ds.borderDash) {
+          ds.data.forEach((v, i) => {
+            if (v == null || isNaN(v)) return;
+            const pc = Array.isArray(ds.pointColors) ? ds.pointColors[i] : (ds.borderColor || '#2563eb');
+            ctx.beginPath(); ctx.arc(xOf(i), yOf(v), 5, 0, Math.PI*2);
+            ctx.fillStyle = pc; ctx.fill();
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.lineWidth = 2;
+          });
+        }
+      });
+
+      // Axes border
+      ctx.strokeStyle = '#d1d5db'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top); ctx.lineTo(PAD.left, PAD.top+cH); ctx.lineTo(PAD.left+cW, PAD.top+cH); ctx.stroke();
+    }
+  };
+  </script>
+  <style>
+    /* ------------------------------------------------------------------ */
+    /* Reset & base                                                         */
+    /* ------------------------------------------------------------------ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --blue:   #2563eb;
+      --green:  #16a34a;
+      --yellow: #ca8a04;
+      --red:    #dc2626;
+      --gray:   #6b7280;
+      --bg:     #f3f4f6;
+      --card:   #ffffff;
+      --border: #e5e7eb;
+      --text:   #111827;
+      --subtext:#6b7280;
+      --nav-h:  64px;
+      --top-h:  56px;
+    }
+    html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); -webkit-tap-highlight-color: transparent; }
+
+    /* ------------------------------------------------------------------ */
+    /* Layout shell                                                         */
+    /* ------------------------------------------------------------------ */
+    #app { display: flex; flex-direction: column; height: 100%; }
+
+    /* Top bar */
+    #topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      height: var(--top-h); background: var(--blue); color: #fff;
+      display: flex; align-items: center; padding: 0 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,.2);
+    }
+    #topbar h1 { font-size: 18px; font-weight: 600; letter-spacing: -.3px; }
+    #topbar span { font-size: 22px; margin-right: 10px; }
+
+    /* Scrollable content */
+    #content {
+      flex: 1; overflow-y: auto; overflow-x: hidden;
+      padding: calc(var(--top-h) + 12px) 12px calc(var(--nav-h) + 12px);
+    }
+
+    /* Bottom nav */
+    #bottomnav {
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+      height: var(--nav-h); background: var(--card); border-top: 1px solid var(--border);
+      display: flex; align-items: stretch;
+    }
+    .nav-btn {
+      flex: 1; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 3px; background: none; border: none;
+      color: var(--gray); font-size: 10px; font-weight: 500; cursor: pointer;
+      transition: color .15s;
+    }
+    .nav-btn .icon { font-size: 22px; }
+    .nav-btn.active { color: var(--blue); }
+
+    /* ------------------------------------------------------------------ */
+    /* Cards                                                                */
+    /* ------------------------------------------------------------------ */
+    .card {
+      background: var(--card); border-radius: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 16px;
+      margin-bottom: 12px;
+    }
+    .card-title { font-size: 14px; font-weight: 600; color: var(--subtext); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px; }
+
+    /* ------------------------------------------------------------------ */
+    /* Status badges                                                        */
+    /* ------------------------------------------------------------------ */
+    .badge {
+      display: inline-block; padding: 2px 10px; border-radius: 99px;
+      font-size: 12px; font-weight: 600;
+    }
+    .badge-normal  { background:#dcfce7; color: var(--green); }
+    .badge-atencao { background:#fef9c3; color: var(--yellow); }
+    .badge-critico { background:#fee2e2; color: var(--red); }
+    .badge-indefinido { background:#f3f4f6; color: var(--gray); }
+
+    /* ------------------------------------------------------------------ */
+    /* Section (tab panel)                                                  */
+    /* ------------------------------------------------------------------ */
+    .section { display: none; }
+    .section.active { display: block; }
+
+    /* ------------------------------------------------------------------ */
+    /* Dashboard                                                            */
+    /* ------------------------------------------------------------------ */
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    .stat-card {
+      background: var(--card); border-radius: 12px; padding: 14px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08); text-align: center;
+    }
+    .stat-card .stat-val { font-size: 28px; font-weight: 700; color: var(--blue); }
+    .stat-card .stat-lbl { font-size: 12px; color: var(--subtext); margin-top: 2px; }
+
+    .alert-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+    }
+    .alert-item:last-child { border-bottom: none; }
+    .alert-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .dot-normal  { background: var(--green); }
+    .dot-atencao { background: var(--yellow); }
+    .dot-critico { background: var(--red); }
+    .dot-indefinido { background: var(--gray); }
+    .alert-info { flex: 1; }
+    .alert-name { font-size: 14px; font-weight: 500; }
+    .alert-val  { font-size: 12px; color: var(--subtext); }
+
+    /* ------------------------------------------------------------------ */
+    /* Exam list                                                            */
+    /* ------------------------------------------------------------------ */
+    .exam-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 14px; background: var(--card); border-radius: 12px;
+      margin-bottom: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08);
+      cursor: pointer; transition: box-shadow .15s;
+    }
+    .exam-item:active { box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+    .exam-date-box {
+      background: var(--blue); color: #fff; border-radius: 8px;
+      padding: 8px 10px; text-align: center; flex-shrink: 0; min-width: 52px;
+    }
+    .exam-date-box .day   { font-size: 22px; font-weight: 700; line-height: 1; }
+    .exam-date-box .month { font-size: 11px; text-transform: uppercase; opacity: .85; }
+    .exam-info { flex: 1; }
+    .exam-lab  { font-size: 15px; font-weight: 600; }
+    .exam-meta { font-size: 12px; color: var(--subtext); margin-top: 2px; }
+    .exam-badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+    .exam-del {
+      background: none; border: none; color: var(--red); font-size: 20px;
+      cursor: pointer; padding: 4px; opacity: .6;
+    }
+    .exam-del:active { opacity: 1; }
+
+    /* ------------------------------------------------------------------ */
+    /* Form — novo exame                                                    */
+    /* ------------------------------------------------------------------ */
+    .form-group { margin-bottom: 14px; }
+    label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; color: var(--subtext); }
+    input[type=text], input[type=date], input[type=number], select, textarea {
+      width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+      font-size: 15px; background: var(--bg); color: var(--text);
+      -webkit-appearance: none; outline: none;
+    }
+    input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+    textarea { resize: vertical; min-height: 72px; }
+
+    .btn {
+      display: block; width: 100%; padding: 13px; border-radius: 10px;
+      border: none; font-size: 16px; font-weight: 600; cursor: pointer;
+      transition: opacity .15s;
+    }
+    .btn:active { opacity: .85; }
+    .btn-primary { background: var(--blue); color: #fff; }
+    .btn-secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+    .btn-danger { background: var(--red); color: #fff; }
+    .btn-sm { font-size: 13px; padding: 7px 14px; width: auto; border-radius: 8px; }
+
+    /* biomarker rows in form */
+    .bio-row {
+      display: flex; gap: 8px; align-items: flex-start; padding: 10px;
+      background: var(--bg); border-radius: 8px; margin-bottom: 8px;
+    }
+    .bio-row .bio-fields { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .bio-row .bio-name { grid-column: 1 / -1; }
+    .bio-del {
+      background: none; border: none; color: var(--red); font-size: 18px;
+      cursor: pointer; padding: 0 4px; align-self: center; flex-shrink: 0;
+    }
+
+    /* quick-select chips */
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+    .chip {
+      padding: 5px 12px; border-radius: 99px; font-size: 12px; font-weight: 500;
+      background: var(--bg); border: 1px solid var(--border); cursor: pointer;
+      transition: all .15s;
+    }
+    .chip:active, .chip.sel { background: var(--blue); color: #fff; border-color: var(--blue); }
+
+    /* ------------------------------------------------------------------ */
+    /* Charts                                                               */
+    /* ------------------------------------------------------------------ */
+    .chart-select { margin-bottom: 14px; }
+    .chart-wrapper { position: relative; height: 260px; margin-bottom: 12px; }
+
+    /* ------------------------------------------------------------------ */
+    /* Analysis                                                             */
+    /* ------------------------------------------------------------------ */
+    .period-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+    .period-tab {
+      flex: 1; padding: 8px; text-align: center; border-radius: 8px; font-size: 13px;
+      font-weight: 600; cursor: pointer; border: 2px solid var(--border); background: var(--card);
+      transition: all .15s;
+    }
+    .period-tab.active { border-color: var(--blue); color: var(--blue); background: #eff6ff; }
+
+    .analysis-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 0; border-bottom: 1px solid var(--border);
+    }
+    .analysis-item:last-child { border-bottom: none; }
+    .trend-icon { font-size: 20px; flex-shrink: 0; width: 28px; text-align: center; }
+    .trend-info { flex: 1; }
+    .trend-name { font-size: 14px; font-weight: 500; }
+    .trend-detail { font-size: 12px; color: var(--subtext); }
+    .trend-badge { flex-shrink: 0; }
+
+    /* ------------------------------------------------------------------ */
+    /* Modal (exam detail)                                                  */
+    /* ------------------------------------------------------------------ */
+    #modal-overlay {
+      display: none; position: fixed; inset: 0; z-index: 200;
+      background: rgba(0,0,0,.5); align-items: flex-end; justify-content: center;
+    }
+    #modal-overlay.open { display: flex; }
+    #modal-box {
+      background: var(--card); border-radius: 20px 20px 0 0; padding: 20px;
+      width: 100%; max-height: 85vh; overflow-y: auto;
+    }
+    #modal-box h2 { font-size: 18px; font-weight: 700; margin-bottom: 16px; }
+    .result-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+    }
+    .result-row:last-child { border-bottom: none; }
+    .result-name { font-size: 14px; font-weight: 500; }
+    .result-val  { font-size: 13px; color: var(--subtext); }
+    .result-right { text-align: right; }
+
+    /* ------------------------------------------------------------------ */
+    /* Empty state                                                          */
+    /* ------------------------------------------------------------------ */
+    .empty {
+      text-align: center; padding: 48px 16px; color: var(--subtext);
+    }
+    .empty .e-icon { font-size: 52px; margin-bottom: 12px; }
+    .empty p { font-size: 15px; line-height: 1.5; }
+
+    /* ------------------------------------------------------------------ */
+    /* Toast notification                                                   */
+    /* ------------------------------------------------------------------ */
+    #toast {
+      position: fixed; bottom: calc(var(--nav-h) + 12px); left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: #1f2937; color: #fff; padding: 10px 20px;
+      border-radius: 99px; font-size: 14px; font-weight: 500;
+      transition: transform .3s; z-index: 300; white-space: nowrap;
+    }
+    #toast.show { transform: translateX(-50%) translateY(0); }
+
+    /* ------------------------------------------------------------------ */
+    /* Misc utilities                                                       */
+    /* ------------------------------------------------------------------ */
+    .mt-8  { margin-top: 8px; }
+    .mt-12 { margin-top: 12px; }
+    .row   { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+    h3 { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+    .section-title { font-size: 20px; font-weight: 700; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ===== TOP BAR ===== -->
+  <div id="topbar">
+    <span>🩸</span>
+    <h1>Saúde Track</h1>
+  </div>
+
+  <!-- ===== CONTENT AREA ===== -->
+  <div id="content">
+
+    <!-- ── DASHBOARD ── -->
+    <section id="sec-dashboard" class="section active">
+      <div class="section-title">Dashboard</div>
+
+      <div class="stat-grid" id="stat-grid">
+        <div class="stat-card"><div class="stat-val" id="stat-exames">—</div><div class="stat-lbl">Exames</div></div>
+        <div class="stat-card"><div class="stat-val" id="stat-bio">—</div><div class="stat-lbl">Biomarcadores</div></div>
+        <div class="stat-card"><div class="stat-val" id="stat-ok" style="color:var(--green)">—</div><div class="stat-lbl">Normais</div></div>
+        <div class="stat-card"><div class="stat-val" id="stat-alert" style="color:var(--red)">—</div><div class="stat-lbl">Em Alerta</div></div>
+      </div>
+
+      <div class="card" id="dash-last-exam">
+        <div class="card-title">Último Exame</div>
+        <div id="dash-last-content">
+          <div class="empty" style="padding:20px 0">
+            <div class="e-icon">📋</div>
+            <p>Nenhum exame registrado ainda.<br>Vá em <strong>Novo</strong> para adicionar.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Alertas Recentes</div>
+        <div id="dash-alerts"></div>
+      </div>
+    </section>
+
+    <!-- ── EXAMES ── -->
+    <section id="sec-exames" class="section">
+      <div class="section-title">Meus Exames</div>
+      <div id="exam-list"></div>
+    </section>
+
+    <!-- ── NOVO EXAME ── -->
+    <section id="sec-novo" class="section">
+      <div class="section-title">Novo Exame</div>
+
+      <form id="form-exame" class="card" onsubmit="submitExame(event)">
+
+        <div class="form-group">
+          <label>Data do Exame *</label>
+          <input type="date" id="f-data" required />
+        </div>
+
+        <div class="form-group">
+          <label>Laboratório</label>
+          <input type="text" id="f-lab" placeholder="Ex.: Fleury, DASA, Hermes Pardini..." />
+        </div>
+
+        <div class="form-group">
+          <label>Observações</label>
+          <textarea id="f-obs" placeholder="Medicações em uso, jejum, etc."></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>Biomarcadores</label>
+          <p style="font-size:12px;color:var(--subtext);margin-bottom:8px">Clique para adicionar rápido:</p>
+          <div class="chips" id="quick-chips"></div>
+          <div id="bio-list"></div>
+          <button type="button" class="btn btn-secondary btn-sm mt-8" onclick="addBioRow()">+ Adicionar manualmente</button>
+        </div>
+
+        <button type="submit" class="btn btn-primary mt-12">💾 Salvar Exame</button>
+      </form>
+    </section>
+
+    <!-- ── GRÁFICOS ── -->
+    <section id="sec-graficos" class="section">
+      <div class="section-title">Gráficos de Evolução</div>
+
+      <div class="card chart-select">
+        <label>Selecionar Biomarcador</label>
+        <select id="chart-select" onchange="renderChart()">
+          <option value="">— Selecione —</option>
+        </select>
+      </div>
+
+      <div class="card">
+        <div class="chart-wrapper">
+          <canvas id="chart-canvas"></canvas>
+        </div>
+        <div id="chart-legend" style="font-size:12px;color:var(--subtext);text-align:center;margin-top:4px"></div>
+      </div>
+
+      <div class="card" id="chart-stats" style="display:none">
+        <div class="card-title">Estatísticas</div>
+        <div id="chart-stats-body"></div>
+      </div>
+    </section>
+
+    <!-- ── ANÁLISE ── -->
+    <section id="sec-analise" class="section">
+      <div class="section-title">Análise de Impacto</div>
+
+      <div class="period-tabs">
+        <div class="period-tab active" data-period="curto_prazo" onclick="selectPeriod(this)">⚡ Curto<br><small>3 meses</small></div>
+        <div class="period-tab" data-period="medio_prazo" onclick="selectPeriod(this)">📅 Médio<br><small>12 meses</small></div>
+        <div class="period-tab" data-period="longo_prazo" onclick="selectPeriod(this)">📈 Longo<br><small>Histórico</small></div>
+      </div>
+
+      <div class="card">
+        <div id="analise-list"></div>
+      </div>
+    </section>
+
+  </div><!-- #content -->
+
+  <!-- ===== BOTTOM NAV ===== -->
+  <nav id="bottomnav">
+    <button class="nav-btn active" data-tab="dashboard" onclick="switchTab(this)">
+      <span class="icon">🏠</span>Dashboard
+    </button>
+    <button class="nav-btn" data-tab="exames" onclick="switchTab(this)">
+      <span class="icon">📋</span>Exames
+    </button>
+    <button class="nav-btn" data-tab="novo" onclick="switchTab(this)">
+      <span class="icon">➕</span>Novo
+    </button>
+    <button class="nav-btn" data-tab="graficos" onclick="switchTab(this)">
+      <span class="icon">📊</span>Gráficos
+    </button>
+    <button class="nav-btn" data-tab="analise" onclick="switchTab(this)">
+      <span class="icon">📈</span>Análise
+    </button>
+  </nav>
+</div><!-- #app -->
+
+<!-- ===== MODAL — exam detail ===== -->
+<div id="modal-overlay" onclick="closeModal(event)">
+  <div id="modal-box">
+    <h2 id="modal-title">Detalhes do Exame</h2>
+    <div id="modal-body"></div>
+    <button class="btn btn-secondary mt-12" onclick="closeModalDirect()">Fechar</button>
+  </div>
+</div>
+
+<!-- ===== TOAST ===== -->
+<div id="toast"></div>
+
+<!-- ===== SCRIPTS ===== -->
+<script>
+// -------------------------------------------------------------------------
+// State
+// -------------------------------------------------------------------------
+const state = {
+  exames: [],
+  evolucao: {},
+  analise: {},
+  currentPeriod: 'curto_prazo',
+  chartInstance: null,
+};
+
+// Common Brazilian blood test biomarkers with typical reference values
+const QUICK_BIOMARKERS = [
+  { name: 'Glicose',            unit: 'mg/dL', min: 70,    max: 99   },
+  { name: 'Colesterol Total',   unit: 'mg/dL', min: null,  max: 200  },
+  { name: 'HDL',                unit: 'mg/dL', min: 40,    max: null },
+  { name: 'LDL',                unit: 'mg/dL', min: null,  max: 130  },
+  { name: 'Triglicerídeos',     unit: 'mg/dL', min: null,  max: 150  },
+  { name: 'Hemoglobina',        unit: 'g/dL',  min: 12,    max: 17   },
+  { name: 'Hematócrito',        unit: '%',     min: 36,    max: 50   },
+  { name: 'Leucócitos',         unit: '/μL',   min: 4000,  max: 11000},
+  { name: 'Plaquetas',          unit: '/μL',   min: 150000,max: 400000},
+  { name: 'Creatinina',         unit: 'mg/dL', min: 0.6,   max: 1.2  },
+  { name: 'Ureia',              unit: 'mg/dL', min: 15,    max: 40   },
+  { name: 'TGO (AST)',          unit: 'U/L',   min: 10,    max: 40   },
+  { name: 'TGP (ALT)',          unit: 'U/L',   min: 7,     max: 56   },
+  { name: 'TSH',                unit: 'mUI/L', min: 0.4,   max: 4.0  },
+  { name: 'T4 Livre',           unit: 'ng/dL', min: 0.8,   max: 1.8  },
+  { name: 'Vitamina D',         unit: 'ng/mL', min: 30,    max: 100  },
+  { name: 'Ferritina',          unit: 'ng/mL', min: 15,    max: 200  },
+  { name: 'Ácido Úrico',        unit: 'mg/dL', min: 3.4,   max: 7.2  },
+  { name: 'Ferro',              unit: 'μg/dL', min: 60,    max: 170  },
+  { name: 'Hemoglobina Glicada',unit: '%',     min: null,  max: 5.7  },
+];
+
+// -------------------------------------------------------------------------
+// API helpers
+// -------------------------------------------------------------------------
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || res.statusText);
+  }
+  return res.json();
+}
+
+// -------------------------------------------------------------------------
+// Toast
+// -------------------------------------------------------------------------
+function showToast(msg, duration = 2500) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), duration);
+}
+
+// -------------------------------------------------------------------------
+// Tab navigation
+// -------------------------------------------------------------------------
+function switchTab(btn) {
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('sec-' + btn.dataset.tab).classList.add('active');
+  if (btn.dataset.tab === 'graficos') loadChart();
+  if (btn.dataset.tab === 'analise') loadAnalysis();
+  if (btn.dataset.tab === 'exames') renderExamList();
+  if (btn.dataset.tab === 'dashboard') renderDashboard();
+}
+
+// -------------------------------------------------------------------------
+// Load all data
+// -------------------------------------------------------------------------
+async function loadAll() {
+  try {
+    const [exames, evolucao] = await Promise.all([
+      api('GET', '/api/exames'),
+      api('GET', '/api/evolucao'),
+    ]);
+    state.exames = exames;
+    state.evolucao = evolucao;
+    renderDashboard();
+    renderExamList();
+    populateChartSelect();
+  } catch (e) {
+    showToast('Erro ao carregar dados: ' + e.message, 4000);
+  }
+}
+
+// -------------------------------------------------------------------------
+// Dashboard
+// -------------------------------------------------------------------------
+function renderDashboard() {
+  const exames = state.exames;
+  document.getElementById('stat-exames').textContent = exames.length;
+
+  // Collect all latest results per biomarker
+  const latest = {};
+  exames.forEach(e => {
+    e.resultados.forEach(r => { latest[r.biomarcador] = r; });
+  });
+
+  const bio = Object.keys(latest);
+  document.getElementById('stat-bio').textContent = bio.length;
+
+  const normal  = bio.filter(b => latest[b].status === 'normal').length;
+  const alerts  = bio.filter(b => ['atencao','critico'].includes(latest[b].status)).length;
+  document.getElementById('stat-ok').textContent    = normal;
+  document.getElementById('stat-alert').textContent = alerts;
+
+  // Last exam card
+  const lastExame = exames[exames.length - 1];
+  const lastEl    = document.getElementById('dash-last-content');
+  if (lastExame) {
+    lastEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-size:16px;font-weight:600">${formatDate(lastExame.data_exame)}</span>
+        <span style="font-size:13px;color:var(--subtext)">${lastExame.laboratorio || 'Laboratório'}</span>
+      </div>
+      ${lastExame.resultados.slice(0,4).map(r => `
+        <div class="alert-item">
+          <div class="alert-dot dot-${r.status}"></div>
+          <div class="alert-info">
+            <div class="alert-name">${r.biomarcador}</div>
+            <div class="alert-val">${r.valor} ${r.unidade}</div>
+          </div>
+          <span class="badge badge-${r.status}">${labelStatus(r.status)}</span>
+        </div>
+      `).join('')}
+      ${lastExame.resultados.length > 4 ? `<div style="font-size:12px;color:var(--subtext);text-align:center;margin-top:8px">+${lastExame.resultados.length - 4} mais</div>` : ''}
+    `;
+  } else {
+    lastEl.innerHTML = `
+      <div class="empty" style="padding:20px 0">
+        <div class="e-icon">📋</div>
+        <p>Nenhum exame registrado ainda.<br>Vá em <strong>Novo</strong> para adicionar.</p>
+      </div>`;
+  }
+
+  // Alerts
+  const alertEl = document.getElementById('dash-alerts');
+  const alertBios = bio.filter(b => ['atencao','critico'].includes(latest[b].status));
+  if (alertBios.length === 0) {
+    alertEl.innerHTML = `<div style="color:var(--green);font-size:14px;text-align:center;padding:8px 0">✅ Todos os marcadores estão normais!</div>`;
+  } else {
+    alertEl.innerHTML = alertBios.map(b => {
+      const r = latest[b];
+      return `
+        <div class="alert-item">
+          <div class="alert-dot dot-${r.status}"></div>
+          <div class="alert-info">
+            <div class="alert-name">${r.biomarcador}</div>
+            <div class="alert-val">${r.valor} ${r.unidade}${r.ref_max ? ' (ref: ≤' + r.ref_max + ')' : ''}</div>
+          </div>
+          <span class="badge badge-${r.status}">${labelStatus(r.status)}</span>
+        </div>`;
+    }).join('');
+  }
+}
+
+// -------------------------------------------------------------------------
+// Exam list
+// -------------------------------------------------------------------------
+function renderExamList() {
+  const el = document.getElementById('exam-list');
+  if (state.exames.length === 0) {
+    el.innerHTML = `
+      <div class="empty">
+        <div class="e-icon">🗂️</div>
+        <p>Nenhum exame cadastrado.<br>Toque em <strong>Novo</strong> para registrar o primeiro.</p>
+      </div>`;
+    return;
+  }
+  // Newest first
+  const sorted = [...state.exames].sort((a,b) => b.data_exame.localeCompare(a.data_exame));
+  el.innerHTML = sorted.map(e => {
+    const d     = new Date(e.data_exame + 'T12:00:00');
+    const day   = d.getDate().toString().padStart(2,'0');
+    const month = d.toLocaleString('pt-BR', {month:'short'}).replace('.','');
+    const normal = e.resultados.filter(r => r.status === 'normal').length;
+    const alert  = e.resultados.filter(r => r.status === 'atencao').length;
+    const crit   = e.resultados.filter(r => r.status === 'critico').length;
+    return `
+      <div class="exam-item" onclick="openModal(${e.id})">
+        <div class="exam-date-box"><div class="day">${day}</div><div class="month">${month}</div></div>
+        <div class="exam-info">
+          <div class="exam-lab">${e.laboratorio || 'Exame de Sangue'}</div>
+          <div class="exam-meta">${e.resultados.length} biomarcador${e.resultados.length !== 1 ? 'es' : ''}</div>
+          <div class="exam-badges">
+            ${normal  ? `<span class="badge badge-normal">${normal} ${normal!==1?'normais':'normal'}</span>` : ''}
+            ${alert   ? `<span class="badge badge-atencao">${alert} atenção</span>` : ''}
+            ${crit    ? `<span class="badge badge-critico">${crit} crítico${crit!==1?'s':''}</span>` : ''}
+          </div>
+        </div>
+        <button class="exam-del" onclick="deleteExame(event,${e.id})">🗑</button>
+      </div>`;
+  }).join('');
+}
+
+// -------------------------------------------------------------------------
+// Modal — exam detail
+// -------------------------------------------------------------------------
+function openModal(id) {
+  const exame = state.exames.find(e => e.id === id);
+  if (!exame) return;
+  document.getElementById('modal-title').textContent = formatDate(exame.data_exame) + (exame.laboratorio ? ' — ' + exame.laboratorio : '');
+  document.getElementById('modal-body').innerHTML = exame.resultados.length === 0
+    ? '<p style="color:var(--subtext)">Nenhum resultado registrado.</p>'
+    : exame.resultados.map(r => `
+        <div class="result-row">
+          <div>
+            <div class="result-name">${r.biomarcador}</div>
+            <div class="result-val">${r.ref_min != null ? 'Ref: ' + r.ref_min : ''}${r.ref_min != null && r.ref_max != null ? ' – ' : ''}${r.ref_max != null ? r.ref_max + ' ' + r.unidade : ''}</div>
+          </div>
+          <div class="result-right">
+            <div style="font-size:16px;font-weight:700">${r.valor} ${r.unidade}</div>
+            <span class="badge badge-${r.status}">${labelStatus(r.status)}</span>
+          </div>
+        </div>`).join('');
+  document.getElementById('modal-overlay').classList.add('open');
+}
+
+function closeModal(e) {
+  if (e.target === document.getElementById('modal-overlay')) closeModalDirect();
+}
+function closeModalDirect() {
+  document.getElementById('modal-overlay').classList.remove('open');
+}
+
+// -------------------------------------------------------------------------
+// Delete exam
+// -------------------------------------------------------------------------
+async function deleteExame(e, id) {
+  e.stopPropagation();
+  if (!confirm('Remover este exame?')) return;
+  try {
+    await api('DELETE', '/api/exames/' + id);
+    showToast('Exame removido!');
+    await loadAll();
+  } catch (err) {
+    showToast('Erro ao remover: ' + err.message, 4000);
+  }
+}
+
+// -------------------------------------------------------------------------
+// Form — new exam
+// -------------------------------------------------------------------------
+function buildQuickChips() {
+  const el = document.getElementById('quick-chips');
+  el.innerHTML = QUICK_BIOMARKERS.map(b =>
+    `<div class="chip" onclick="addBioRowFromTemplate('${b.name}',${b.min??'null'},${b.max??'null'},'${b.unit}')">${b.name}</div>`
+  ).join('');
+  // Set today's date
+  document.getElementById('f-data').valueAsDate = new Date();
+}
+
+function addBioRow(name = '', min = '', max = '', unit = '', val = '') {
+  const el   = document.getElementById('bio-list');
+  const idx  = Date.now();
+  const div  = document.createElement('div');
+  div.className = 'bio-row';
+  div.id = 'bio-' + idx;
+  div.innerHTML = `
+    <div class="bio-fields">
+      <input class="bio-name" type="text" placeholder="Biomarcador" value="${name}" required />
+      <input type="number" step="any" placeholder="Valor" value="${val}" required />
+      <input type="text" placeholder="Unidade" value="${unit}" />
+      <input type="number" step="any" placeholder="Ref. mín" value="${min}" />
+      <input type="number" step="any" placeholder="Ref. máx" value="${max}" />
+    </div>
+    <button type="button" class="bio-del" onclick="document.getElementById('bio-${idx}').remove()">✕</button>`;
+  el.appendChild(div);
+  div.querySelector('input[placeholder="Valor"]').focus();
+}
+
+function addBioRowFromTemplate(name, min, max, unit) {
+  addBioRow(name, min ?? '', max ?? '', unit);
+}
+
+function getBioRows() {
+  const rows = [];
+  document.querySelectorAll('#bio-list .bio-row').forEach(row => {
+    const inputs = row.querySelectorAll('input');
+    const biomarcador = inputs[0].value.trim();
+    const valor       = parseFloat(inputs[1].value);
+    const unidade     = inputs[2].value.trim();
+    const ref_min     = inputs[3].value !== '' ? parseFloat(inputs[3].value) : null;
+    const ref_max     = inputs[4].value !== '' ? parseFloat(inputs[4].value) : null;
+    if (biomarcador && !isNaN(valor)) {
+      rows.push({ biomarcador, valor, unidade, ref_min, ref_max });
+    }
+  });
+  return rows;
+}
+
+async function submitExame(e) {
+  e.preventDefault();
+  const data      = document.getElementById('f-data').value;
+  const lab       = document.getElementById('f-lab').value.trim();
+  const obs       = document.getElementById('f-obs').value.trim();
+  const resultados = getBioRows();
+
+  if (!data) { showToast('Informe a data do exame.'); return; }
+  if (resultados.length === 0) { showToast('Adicione ao menos um biomarcador.'); return; }
+
+  try {
+    await api('POST', '/api/exames', { data_exame: data, laboratorio: lab, observacoes: obs, resultados });
+    showToast('✅ Exame salvo com sucesso!');
+    // Reset form
+    document.getElementById('f-data').valueAsDate = new Date();
+    document.getElementById('f-lab').value = '';
+    document.getElementById('f-obs').value = '';
+    document.getElementById('bio-list').innerHTML = '';
+    await loadAll();
+    // Switch to exames tab
+    const examesBtn = document.querySelector('[data-tab="exames"]');
+    switchTab(examesBtn);
+  } catch (err) {
+    showToast('Erro ao salvar: ' + err.message, 4000);
+  }
+}
+
+// -------------------------------------------------------------------------
+// Charts
+// -------------------------------------------------------------------------
+function populateChartSelect() {
+  const sel  = document.getElementById('chart-select');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— Selecione —</option>';
+  Object.keys(state.evolucao).sort().forEach(b => {
+    const opt = document.createElement('option');
+    opt.value = b; opt.textContent = b;
+    sel.appendChild(opt);
+  });
+  if (prev && state.evolucao[prev]) sel.value = prev;
+}
+
+function loadChart() {
+  populateChartSelect();
+  renderChart();
+}
+
+function renderChart() {
+  const bio  = document.getElementById('chart-select').value;
+  const statsEl = document.getElementById('chart-stats');
+  const legendEl = document.getElementById('chart-legend');
+
+  statsEl.style.display = 'none';
+  legendEl.textContent = '';
+
+  if (!bio || !state.evolucao[bio]) return;
+
+  const data = state.evolucao[bio];
+  const { datas, valores, unidade, ref_min, ref_max } = data;
+
+  // Color points by status
+  const pointColors = valores.map(v => {
+    if (ref_min != null && v < ref_min) return '#dc2626';
+    if (ref_max != null && v > ref_max) return '#dc2626';
+    return '#16a34a';
+  });
+
+  const datasets = [
+    { label: bio, data: valores, borderColor: '#2563eb', pointColors }
+  ];
+  if (ref_min != null) datasets.push({ label: 'Ref. Mín', data: Array(datas.length).fill(ref_min), borderColor: 'rgba(22,163,74,.5)', borderDash: [6,3], showPoints: false });
+  if (ref_max != null) datasets.push({ label: 'Ref. Máx', data: Array(datas.length).fill(ref_max), borderColor: 'rgba(220,38,38,.5)', borderDash: [6,3], showPoints: false });
+
+  const labels = datas.map(d => formatDateShort(d));
+  SaudeChart.draw('chart-canvas', labels, datasets, {});
+
+  legendEl.textContent = `${valores.length} ${valores.length !== 1 ? 'medições' : 'medição'} registrada${valores.length !== 1 ? 's' : ''}` + (unidade ? ` (${unidade})` : '');
+
+  // Stats
+  const min  = Math.min(...valores);
+  const max  = Math.max(...valores);
+  const avg  = (valores.reduce((a,b) => a+b, 0) / valores.length).toFixed(1);
+  statsEl.style.display = 'block';
+  document.getElementById('chart-stats-body').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;text-align:center">
+      <div><div style="font-size:20px;font-weight:700;color:var(--blue)">${min}</div><div style="font-size:11px;color:var(--subtext)">Mínimo</div></div>
+      <div><div style="font-size:20px;font-weight:700;color:var(--blue)">${avg}</div><div style="font-size:11px;color:var(--subtext)">Média</div></div>
+      <div><div style="font-size:20px;font-weight:700;color:var(--blue)">${max}</div><div style="font-size:11px;color:var(--subtext)">Máximo</div></div>
+    </div>`;
+}
+
+// -------------------------------------------------------------------------
+// Analysis
+// -------------------------------------------------------------------------
+async function loadAnalysis() {
+  try {
+    state.analise = await api('GET', '/api/analise_impacto');
+    renderAnalysis();
+  } catch (e) {
+    showToast('Erro ao carregar análise: ' + e.message, 4000);
+  }
+}
+
+function selectPeriod(el) {
+  document.querySelectorAll('.period-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  state.currentPeriod = el.dataset.period;
+  renderAnalysis();
+}
+
+function renderAnalysis() {
+  const el      = document.getElementById('analise-list');
+  const period  = state.currentPeriod;
+  const analise = state.analise;
+  const bios    = Object.keys(analise);
+
+  if (bios.length === 0) {
+    el.innerHTML = `
+      <div class="empty">
+        <div class="e-icon">📈</div>
+        <p>Nenhum dado para análise.<br>Adicione pelo menos 2 exames para ver tendências.</p>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = bios.sort().map(bio => {
+    const t = analise[bio][period];
+    const trendIcon = t.tendencia === 'aumentando' ? '📈' : t.tendencia === 'diminuindo' ? '📉' : t.tendencia === 'estavel' ? '➡️' : '❓';
+    const varStr    = t.variacao_pct >= 0 ? '+' + t.variacao_pct + '%' : t.variacao_pct + '%';
+    const detail    = t.tendencia === 'insuficiente'
+      ? 'Dados insuficientes (min. 2 medições)'
+      : `De ${t.valor_inicial} → ${t.valor_atual} (${varStr}) | ${t.num_medicoes} medições`;
+    return `
+      <div class="analysis-item">
+        <div class="trend-icon">${trendIcon}</div>
+        <div class="trend-info">
+          <div class="trend-name">${bio}</div>
+          <div class="trend-detail">${detail}</div>
+        </div>
+        <div class="trend-badge">
+          <span class="badge badge-${t.status}">${labelStatus(t.status)}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// -------------------------------------------------------------------------
+// Helpers
+// -------------------------------------------------------------------------
+function formatDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso + 'T12:00:00');
+  return d.toLocaleDateString('pt-BR', { day:'2-digit', month:'long', year:'numeric' });
+}
+
+function formatDateShort(iso) {
+  if (!iso) return '';
+  const d = new Date(iso + 'T12:00:00');
+  return d.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'2-digit' });
+}
+
+function labelStatus(s) {
+  const map = { normal:'Normal', atencao:'Atenção', critico:'Crítico', indefinido:'—' };
+  return map[s] || s;
+}
+
+// -------------------------------------------------------------------------
+// Init
+// -------------------------------------------------------------------------
+buildQuickChips();
+loadAll();
+</script>
+</body>
+</html>
